@@ -15,4 +15,4 @@ benchmark_results/
 *.png
 *.json
 *.csv
-
+*.pkl

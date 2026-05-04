@@ -5,25 +5,33 @@ from pathlib import Path
 from training_pipeline import train_all, compare_models, RESEARCH_PALETTE
 from feature_engineering import build_feature_dataframe
 
+import argparse
+
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
 DATA_PATH = Path("data/vcbench_final_public.csv")
 OUTPUT_DIR = Path("research_results/ablation_study")
-N_TRIALS = 2  # Small number for quick demo
-MODELS = ["logreg", "xgboost", "random_forest"]
+MODELS = ["logreg", "xgboost", "random_forest", "lightgbm", "knn", "adaboost", "svm", "mlp"]
 
-def run_ablation():
+def run_ablation(n_trials=2):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     
+    print(f"Starting Ablation Study (Trials: {n_trials})")
     print("Loading data...")
     df_raw = pd.read_csv(DATA_PATH)
-    # Convert back to list of dicts as training_pipeline expects
-    records = df_raw.to_dict("records")
     
-    # Split records for consistent comparison
+    # Split records for consistent comparison WITH stratification
     from sklearn.model_selection import train_test_split
-    train_recs, test_recs = train_test_split(records, test_size=0.2, random_state=42)
+    train_df, test_df = train_test_split(
+        df_raw, 
+        test_size=0.2, 
+        random_state=42, 
+        stratify=df_raw["success"] if "success" in df_raw.columns else None
+    )
+    
+    train_recs = train_df.to_dict("records")
+    test_recs  = test_df.to_dict("records")
 
     # Prepare test data
     from training_pipeline import load_data
@@ -33,7 +41,7 @@ def run_ablation():
     print("\n" + "="*40)
     print("RUNNING BASELINE (Numeric Only)")
     print("="*40)
-    results_base = train_all(train_recs, models=MODELS, n_trials=N_TRIALS, use_text=False)
+    results_base = train_all(train_recs, models=MODELS, n_trials=n_trials, use_text=False)
     metrics_base = compare_models(results_base, X_test, y_test)
     metrics_base["mode"] = "Baseline"
     
@@ -41,7 +49,7 @@ def run_ablation():
     print("\n" + "="*40)
     print("RUNNING HYBRID (Numeric + Text)")
     print("="*40)
-    results_hybrid = train_all(train_recs, models=MODELS, n_trials=N_TRIALS, use_text=True)
+    results_hybrid = train_all(train_recs, models=MODELS, n_trials=n_trials, use_text=True)
     metrics_hybrid = compare_models(results_hybrid, X_test, y_test)
     metrics_hybrid["mode"] = "Hybrid"
     
@@ -54,38 +62,41 @@ def run_ablation():
     print(f"\n[Done] Ablation results saved to {OUTPUT_DIR}")
 
 def plot_ablation_results(df):
-    # Melt the dataframe to tidy format for plotting multiple metrics
     metrics = ["f0.5", "precision", "recall"]
-    df_plot = df.melt(id_vars=["model", "mode"], value_vars=metrics, var_name="Metric", value_name="Score")
     
-    plt.figure(figsize=(15, 8))
     sns.set_style("whitegrid")
     
-    ax = sns.barplot(data=df_plot, x="model", y="Score", hue="mode", palette=["#95a5a6", "#e74c3c"])
-    
-    # We'll use facets if possible, but a grouped bar chart is clearer for side-by-side
-    plt.title("Ablation Study: Numeric vs Hybrid (Text) Features", fontsize=16, fontweight="bold", pad=20)
-    plt.ylabel("Score", fontsize=12)
-    plt.xlabel("Model", fontsize=12)
-    plt.ylim(0, 1.1)
-    
-    # We want to distinguish metrics, so maybe subplots?
-    plt.close() # Reset
-    
-    fig, axes = plt.subplots(1, 3, figsize=(20, 6), sharey=True)
-    for i, metric in enumerate(metrics):
-        sns.barplot(data=df, x="model", y=metric, hue="mode", ax=axes[i], palette=["#95a5a6", "#3498db"])
-        axes[i].set_title(f"{metric.upper()}", fontweight="bold")
-        axes[i].set_ylim(0, df[metrics].max().max() * 1.2)
+    for metric in metrics:
+        plt.figure(figsize=(12, 7))
         
-        # Add labels
-        for p in axes[i].patches:
-            axes[i].annotate(f"{p.get_height():.3f}", (p.get_x() + p.get_width() / 2., p.get_height()),
-                        ha="center", va="center", xytext=(0, 9), textcoords="offset points", fontsize=9)
-
-    plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "ablation_comparison_metrics.png", dpi=150)
-    plt.show()
+        # Consistent color palette for Baseline vs Hybrid
+        palette = {"Baseline": "#95a5a6", "Hybrid": "#3498db"}
+        
+        ax = sns.barplot(data=df, x="model", y=metric, hue="mode", palette=palette)
+        
+        plt.title(f"Ablation Study: {metric.upper()} Comparison", fontsize=16, fontweight="bold", pad=20)
+        plt.ylabel(metric.capitalize(), fontsize=12)
+        plt.xlabel("Model", fontsize=12)
+        plt.ylim(0, df[metric].max() * 1.25)
+        plt.xticks(rotation=30, ha="right")
+        
+        # Add labels on top of bars
+        for p in ax.patches:
+            if p.get_height() > 0:
+                ax.annotate(f"{p.get_height():.3f}", (p.get_x() + p.get_width() / 2., p.get_height()),
+                            ha="center", va="center", xytext=(0, 9), textcoords="offset points", fontsize=9, fontweight="bold")
+        
+        plt.legend(title="Feature Set", loc="upper right")
+        plt.tight_layout()
+        
+        save_path = OUTPUT_DIR / f"ablation_{metric}.png"
+        plt.savefig(save_path, dpi=150)
+        print(f"Saved: {save_path}")
+        plt.close()
 
 if __name__ == "__main__":
-    run_ablation()
+    parser = argparse.ArgumentParser(description="Run Ablation Study")
+    parser.add_argument("--n_trials", type=int, default=2, help="Number of Optuna trials")
+    args = parser.parse_args()
+    
+    run_ablation(n_trials=args.n_trials)

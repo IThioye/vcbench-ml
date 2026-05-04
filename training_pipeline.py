@@ -1,7 +1,8 @@
 """
 training_pipeline.py
 ───────────────────────
-Trains XGBoost, LightGBM, Logistic Regression, and Random Forest
+Trains XGBoost, AdaBoost, LightGBM, Logistic Regression, Random Forest, 
+and Neural Network
 on the founder-success dataset with Optuna tuning, shared CV evaluation,
 and a head-to-head comparison report.
  
@@ -25,11 +26,13 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier, StackingClassifier
+from sklearn.ensemble import RandomForestClassifier, StackingClassifier, AdaBoostClassifier
+from sklearn.svm import SVC
+from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import (
     roc_auc_score, average_precision_score,
     precision_score, recall_score,
-    classification_report, precision_recall_curve, fbeta_score,
+ precision_recall_curve, fbeta_score,
     confusion_matrix, ConfusionMatrixDisplay
 )
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -208,6 +211,51 @@ def build_knn(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pi
             **params,
         )),
     ])
+
+def build_adaboost(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pipeline:
+    num_cols = get_numeric_columns(X_sample)
+    return Pipeline([
+        ("enc",   IndustryTargetEncoder()),
+        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text)),
+        ("model", AdaBoostClassifier(
+            random_state=RANDOM_STATE,
+            **params,
+        )),
+    ])
+
+def build_svm(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pipeline:
+    num_cols = get_numeric_columns(X_sample)
+    return Pipeline([
+        ("enc",   IndustryTargetEncoder()),
+        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text)),
+        ("model", SVC(
+            random_state=RANDOM_STATE,
+            probability=True,
+            **params,
+        )),
+    ])
+
+def build_mlp(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pipeline:
+    # Reconstruct hidden_layer_sizes from dynamic Optuna parameters if present
+    model_params = params.copy()
+    if "n_layers" in model_params:
+        n_layers = model_params.pop("n_layers")
+        layers = []
+        for i in range(n_layers):
+            layers.append(model_params.pop(f"n_units_l{i}", 64)) # Default if missing
+        model_params["hidden_layer_sizes"] = tuple(layers)
+    
+    num_cols = get_numeric_columns(X_sample)
+    return Pipeline([
+        ("enc",   IndustryTargetEncoder()),
+        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text)),
+        ("model", MLPClassifier(
+            random_state=RANDOM_STATE,
+            max_iter=1000,
+            **model_params,
+        )),
+    ])
+
  
 # ─────────────────────────────────────────────
 # Per-model Optuna search spaces
@@ -271,7 +319,35 @@ def knn_search_space(trial: optuna.Trial, pos_weight: float) -> dict:
         "n_neighbors": trial.suggest_int("n_neighbors", 3, 15),
         "weights":     trial.suggest_categorical("weights", ["uniform", "distance"]),
         "p":           trial.suggest_categorical("p", [1, 2]),
-    } 
+    }
+
+def adaboost_search_space(trial: optuna.Trial, pos_weight: float) -> dict:
+    return {
+        "n_estimators": trial.suggest_int("n_estimators", 50, 500),
+        "learning_rate": trial.suggest_float("learning_rate", 1e-3, 1.0, log=True),
+    }
+
+def svm_search_space(trial: optuna.Trial, pos_weight: float) -> dict:
+    return {
+        "C": trial.suggest_float("C", 1e-3, 10.0, log=True),
+        "kernel": trial.suggest_categorical("kernel", ["linear", "poly", "rbf", "sigmoid"]),
+        "gamma": trial.suggest_categorical("gamma", ["scale", "auto"]),
+    }
+
+def mlp_search_space(trial: optuna.Trial, pos_weight: float) -> dict:
+    n_layers = trial.suggest_int("n_layers", 1, 3)
+    layers = []
+    for i in range(n_layers):
+        layers.append(trial.suggest_int(f"n_units_l{i}", 16, 128))
+    
+    return {
+        "hidden_layer_sizes": tuple(layers),
+        "activation": trial.suggest_categorical("activation", ["tanh", "relu"]),
+        "solver": trial.suggest_categorical("solver", ["sgd", "adam"]),
+        "alpha": trial.suggest_float("alpha", 1e-5, 1e-2, log=True),
+        "learning_rate": trial.suggest_categorical("learning_rate", ["constant", "adaptive"]),
+    }
+ 
  
 # ─────────────────────────────────────────────
 # Model registry
@@ -295,6 +371,15 @@ MODEL_REGISTRY = {
     "knn": {"builder": build_knn, "search": knn_search_space, "default_params": lambda pw: {
         "n_neighbors": 5, "weights": "uniform", "p": 2,
     }},
+    "adaboost": {"builder": build_adaboost, "search": adaboost_search_space, "default_params": lambda pw: {
+        "n_estimators": 100, "learning_rate": 0.1,
+    }},
+    "svm": {"builder": build_svm, "search": svm_search_space, "default_params": lambda pw: {
+        "C": 1.0, "kernel": "rbf", "gamma": "scale",
+    }},
+    "mlp": {"builder": build_mlp, "search": mlp_search_space, "default_params": lambda pw: {
+        "hidden_layer_sizes": (64, 32), "activation": "relu", "solver": "adam", "alpha": 0.0001,
+    }},
 }
  
  
@@ -304,10 +389,11 @@ MODEL_REGISTRY = {
  
 def evaluate_cv(pipeline: Pipeline, X: pd.DataFrame, y: pd.Series) -> dict:
     cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    from sklearn.metrics import make_scorer, fbeta_score
     scoring = {
         "roc_auc":   "roc_auc",
         "avg_prec":  "average_precision",
-        "f0.5":        "f1",
+        "f0.5":      make_scorer(fbeta_score, beta=0.5),
         "precision": "precision",
         "recall":    "recall",
     }
@@ -543,7 +629,7 @@ def compare_models(
             "threshold":  round(threshold, 3),
         })
  
-    comparison = pd.DataFrame(rows).set_index("model").sort_values("auc_pr", ascending=False)
+    comparison = pd.DataFrame(rows).set_index("model").sort_values("f0.5", ascending=False)
  
     print("\n" + "="*72)
     print("  MODEL COMPARISON - Held-out test set")
@@ -551,7 +637,7 @@ def compare_models(
     print("="*72)
     print(comparison.to_string())
     print("="*72)
-    print(f"  Winner (AUC-PR): {comparison['auc_pr'].idxmax()}")
+    print(f"  Winner (F0.5): {comparison['f0.5'].idxmax()}")
 
  
     # ── Plot ─────────────────────────────────────────────────────────────
@@ -576,7 +662,7 @@ def compare_models(
     from sklearn.metrics import precision_recall_curve
     for i, (name, proba) in enumerate(probas.items()):
         p, r, _ = precision_recall_curve(y_test, proba)
-        ax.plot(r, p, color=colors[i], lw=2, label=f"{name} (AP={comparison.loc[name,'auc_pr']:.3f})")
+        ax.plot(r, p, color=colors[i % len(colors)], lw=2, label=f"{name} (AP={comparison.loc[name,'auc_pr']:.3f})")
     ax.set_xlabel("Recall"); ax.set_ylabel("Precision")
     ax.set_title("Precision-Recall Curves", fontweight="bold")
     ax.legend(fontsize=8)
@@ -588,7 +674,7 @@ def compare_models(
     for i, name in enumerate(names):
         vals = [comparison.loc[name, m] for m in metrics]
         xs   = np.arange(len(metrics)) + i * bar_w
-        ax.bar(xs, vals, bar_w, label=name, color=colors[i], alpha=0.85)
+        ax.bar(xs, vals, bar_w, label=name, color=colors[i % len(colors)], alpha=0.85)
     ax.set_xticks(np.arange(len(metrics)) + bar_w * 1.5)
     ax.set_xticklabels(metrics); ax.set_ylim(0, 1.1)
     ax.set_title("f0.5 / Precision / Recall @ best threshold", fontweight="bold")
@@ -598,7 +684,7 @@ def compare_models(
     ax = axes[1, 1]
     for i, (name, proba) in enumerate(probas.items()):
         ax.hist(proba[y_test == 1], bins=20, alpha=0.55, label=name,
-                color=colors[i], density=True)
+                color=colors[i % len(colors)], density=True)
     ax.set_xlabel("P(success)"); ax.set_ylabel("Density")
     ax.set_title("Predicted prob. — positive class", fontweight="bold")
     ax.legend(fontsize=8)
@@ -711,15 +797,34 @@ def plot_feature_importance(pipeline: Pipeline, X: pd.DataFrame,
     """Extract feature importances (gain/coefs) and plot the top N."""
     output_dir.mkdir(exist_ok=True)
     try:
-        model = pipeline.named_steps["model"]
-        feature_names = pipeline.named_steps["enc"].transform(X.head(1)).columns.tolist()
+        # Check if this is a standard Pipeline or a raw model (like StackingClassifier)
+        if hasattr(pipeline, "named_steps"):
+            model = pipeline.named_steps["model"]
+            # Correctly extract feature names from the ColumnTransformer (prep step)
+            try:
+                feature_names = pipeline.named_steps["prep"].get_feature_names_out()
+            except:
+                feature_names = [f"f{i}" for i in range(model.n_features_in_)]
+        else:
+            # For stacking ensembles or raw models, we skip feature importance for now
+            # as it's not directly comparable to base models.
+            return
+
         if hasattr(model, "feature_importances_"):
             importances = model.feature_importances_
             suffix = "(Importance)"
         elif hasattr(model, "coef_"):
-            importances = np.abs(model.coef_[0]) if len(model.coef_.shape) > 1 else np.abs(model.coef_)
+            # Handle sparse coefficients (common with SVM + TF-IDF)
+            importances = model.coef_
+            if hasattr(importances, "toarray"):
+                importances = importances.toarray()
+            importances = np.abs(importances[0]) if len(importances.shape) > 1 else np.abs(importances)
             suffix = "(Abs Coef)"
         else: return
+
+        if len(importances) != len(feature_names):
+            print(f"Warning: Importance length ({len(importances)}) != Name length ({len(feature_names)}) for {model_name}")
+            return
 
         fi = pd.Series(importances, index=feature_names).sort_values(ascending=True).tail(top_n)
         plt.figure(figsize=(10, 7))
@@ -729,7 +834,7 @@ def plot_feature_importance(pipeline: Pipeline, X: pd.DataFrame,
         plt.tight_layout()
         plt.savefig(output_dir / f"{model_name.lower().replace(' ', '_')}_feature_importance.png", dpi=150)
         plt.close()
-    except Exception as e: print(f"Error plotting FI: {e}")
+    except Exception as e: print(f"Error plotting FI for {model_name}: {e}")
 
 
 def plot_learning_curve(pipeline: Pipeline, X: pd.DataFrame, y: pd.Series,
@@ -752,7 +857,7 @@ def plot_learning_curve(pipeline: Pipeline, X: pd.DataFrame, y: pd.Series,
     except Exception as e: print(f"Error plotting LC: {e}")
 
 def plot_metric_comparison(comparison_df: pd.DataFrame, output_dir: Path = Path("research_results")):
-    """Plot individual bar charts for Precision, Recall, and F0.5 comparison with consistent colors and legend."""
+    """Plot individual bar charts for Precision, Recall, and F0.5 comparison and save them as separate files."""
     output_dir.mkdir(exist_ok=True)
     metrics = ["precision", "recall", "f0.5"]
     
@@ -760,37 +865,33 @@ def plot_metric_comparison(comparison_df: pd.DataFrame, output_dir: Path = Path(
     all_models = comparison_df.index.tolist()
     model_colors = {name: RESEARCH_PALETTE[i % len(RESEARCH_PALETTE)] for i, name in enumerate(all_models)}
     
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    
-    for i, metric in enumerate(metrics):
-        ax = axes[i]
+    for metric in metrics:
+        plt.figure(figsize=(10, 6))
+        
         # Sort values but keep track of model names for colors
         data = comparison_df[metric].sort_values(ascending=False)
         bar_colors = [model_colors[name] for name in data.index]
         
-        bars = data.plot(kind="bar", ax=ax, color=bar_colors, alpha=0.8, edgecolor="black")
-        ax.set_title(f"Model Comparison: {metric.capitalize()}", fontweight="bold", fontsize=13)
-        ax.set_ylabel("Score")
-        ax.set_ylim(0, 1.1)
-        ax.grid(axis="y", linestyle="--", alpha=0.4)
-        ax.set_xticklabels(data.index, rotation=45, ha="right")
+        ax = data.plot(kind="bar", color=bar_colors, alpha=0.8, edgecolor="black")
+        plt.title(f"Model Comparison: {metric.capitalize()}", fontweight="bold", fontsize=14, pad=15)
+        plt.ylabel("Score", fontsize=12)
+        plt.xlabel("Model", fontsize=12)
+        plt.ylim(0, 1.1)
+        plt.grid(axis="y", linestyle="--", alpha=0.4)
+        plt.xticks(rotation=45, ha="right")
         
         # Add values on top of bars
         for p in ax.patches:
-            ax.annotate(f"{p.get_height():.3f}", (p.get_x() + p.get_width() / 2., p.get_height()),
-                        ha="center", va="center", xytext=(0, 9), textcoords="offset points", fontsize=10)
-            
-    # Add a global legend
-    from matplotlib.lines import Line2D
-    legend_elements = [Line2D([0], [0], color=model_colors[m], lw=4, label=m) for m in all_models]
-    fig.legend(handles=legend_elements, loc="lower center", ncol=len(all_models), 
-               bbox_to_anchor=(0.5, -0.05), frameon=False, fontsize=12)
-            
-    plt.tight_layout(rect=[0, 0.05, 1, 1])
-    filename = output_dir / "precision_recall_f05_comparison.png"
-    plt.savefig(filename, dpi=150, bbox_inches="tight")
-    print(f"[Chart] Saved {filename}")
-    plt.close()
+            if p.get_height() > 0:
+                ax.annotate(f"{p.get_height():.3f}", (p.get_x() + p.get_width() / 2., p.get_height()),
+                            ha="center", va="center", xytext=(0, 9), textcoords="offset points", fontsize=10, fontweight="bold")
+        
+        plt.tight_layout()
+        filename = output_dir / f"comparison_{metric}.png"
+        plt.savefig(filename, dpi=150, bbox_inches="tight")
+        print(f"[Chart] Saved {filename}")
+        plt.close()
+
 
 
 def plot_confusion_matrix(pipeline: Pipeline, X: pd.DataFrame, y: pd.Series,
@@ -817,9 +918,6 @@ def plot_confusion_matrix(pipeline: Pipeline, X: pd.DataFrame, y: pd.Series,
     plt.savefig(filename, dpi=150, bbox_inches="tight")
     print(f"[Chart] Saved {filename}")
     plt.close()
-
-
-
 
 
 # ─────────────────────────────────────────────

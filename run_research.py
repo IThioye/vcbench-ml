@@ -24,7 +24,7 @@ TEST_SIZE      = 0.20
 
 def main():
     parser = argparse.ArgumentParser(description="Run Research/Benchmark Pipeline")
-    parser.add_argument("--n_trials", type=int, default=20, help="Number of Optuna trials")
+    parser.add_argument("--n_trials", type=int, default=5, help="Number of Optuna trials")
     parser.add_argument("--mode", type=str, default="research", choices=["research", "benchmark"], help="Mode: research or benchmark")
     parser.add_argument("--private_data", type=str, default="data/vcbench_final_private.csv", help="Path to the private test set")
     parser.add_argument("--use_text", action="store_true", help="Use TF-IDF text features (default: True)")
@@ -109,11 +109,15 @@ def main():
         print(f"   Processing {model_name}...")
         pipeline = res["pipeline"]
         plot_feature_importance(pipeline, res["X"], model_name, output_dir=output_dir / "feature_importance")
-        plot_learning_curve(pipeline, res["X"], res["y"], model_name, output_dir=output_dir / "learning_curve")
+        
+        # Skip learning curve for ensemble as it's too slow
+        if model_name != "ensemble_stack":
+            plot_learning_curve(pipeline, res["X"], res["y"], model_name, output_dir=output_dir / "learning_curve")
+            
         plot_confusion_matrix(pipeline, X_test, y_test, model_name, output_dir=output_dir / "confusion_matrices")
         
     # 6. Identify and save the Best Model
-    best_model_name = comparison_df["auc_pr"].idxmax()
+    best_model_name = comparison_df["f0.5"].idxmax()
     print(f"Best model found: {best_model_name}")
     
     best_pipeline = results[best_model_name]["pipeline"]
@@ -141,7 +145,7 @@ def run_benchmark_submission(results, test_records, output_dir):
     X_private, _, ids_private = load_data(test_records)
     
     # AUTOMATIC SELECTION: Pick best model based on CV Average Precision (test_mean)
-    best_name = max(results.keys(), key=lambda k: results[k]["cv_summary"]["avg_prec"]["test_mean"])
+    best_name = max(results.keys(), key=lambda k: results[k]["cv_summary"]["f0.5"]["test_mean"])
     
     print(f"Automatically selected best model based on CV: '{best_name}'")
     best_res = results[best_name]
