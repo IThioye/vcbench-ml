@@ -35,7 +35,7 @@ from sklearn.metrics import (
  precision_recall_curve, fbeta_score,
     confusion_matrix, ConfusionMatrixDisplay
 )
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator, TransformerMixin, clone
 import xgboost as xgb
 import lightgbm as lgb
 import optuna
@@ -115,11 +115,11 @@ def load_data(records: list[dict]) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
 # Preprocessing Helper
 # ─────────────────────────────────────────────
 
-def get_hybrid_preprocessor(numeric_cols: list[str], use_text: bool = True):
+def get_hybrid_preprocessor(numeric_cols: list[str], use_text: bool = True, text_max_features: int = 5000):
     """Returns a ColumnTransformer for numeric (scaled) and optionally text (TF-IDF) features."""
     transformers = [("num",  StandardScaler(), numeric_cols)]
     if use_text:
-        transformers.append(("text", TfidfVectorizer(max_features=1000, stop_words="english", ngram_range=(1, 2)), "text_summary"))
+        transformers.append(("text", TfidfVectorizer(max_features=text_max_features, stop_words="english", ngram_range=(1, 2)), "text_summary"))
         
     return ColumnTransformer(
         transformers=transformers,
@@ -137,11 +137,11 @@ def get_numeric_columns(X: pd.DataFrame) -> list[str]:
 # Per-model pipeline builders
 # ─────────────────────────────────────────────
  
-def build_xgb(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pipeline:
+def build_xgb(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_max_features: int = 5000) -> Pipeline:
     num_cols = get_numeric_columns(X_sample)
     return Pipeline([
         ("enc",   IndustryTargetEncoder()),
-        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text)),
+        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text, text_max_features=text_max_features)),
         ("model", xgb.XGBClassifier(
             objective="binary:logistic",
             eval_metric="aucpr",
@@ -152,11 +152,11 @@ def build_xgb(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pi
     ])
  
  
-def build_lgbm(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pipeline:
+def build_lgbm(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_max_features: int = 5000) -> Pipeline:
     num_cols = get_numeric_columns(X_sample)
     return Pipeline([
         ("enc",   IndustryTargetEncoder()),
-        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text)),
+        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text, text_max_features=text_max_features)),
         ("model", lgb.LGBMClassifier(
             objective="binary",
             metric="average_precision",
@@ -168,7 +168,7 @@ def build_lgbm(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> P
     ])
  
  
-def build_logreg(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pipeline:
+def build_logreg(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_max_features: int = 5000) -> Pipeline:
     # Handle Optuna artifacts (e.g., penalty_saga)
     model_params = params.copy()
     if "penalty_saga" in model_params:
@@ -177,7 +177,7 @@ def build_logreg(params: dict, X_sample: pd.DataFrame, use_text: bool = True) ->
     num_cols = get_numeric_columns(X_sample)
     return Pipeline([
         ("enc",    IndustryTargetEncoder()),
-        ("prep",   get_hybrid_preprocessor(num_cols, use_text=use_text)),
+        ("prep",   get_hybrid_preprocessor(num_cols, use_text=use_text, text_max_features=text_max_features)),
         ("model",  LogisticRegression(
             max_iter=2000,
             random_state=RANDOM_STATE,
@@ -188,11 +188,11 @@ def build_logreg(params: dict, X_sample: pd.DataFrame, use_text: bool = True) ->
 
  
  
-def build_rf(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pipeline:
+def build_rf(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_max_features: int = 5000) -> Pipeline:
     num_cols = get_numeric_columns(X_sample)
     return Pipeline([
         ("enc",   IndustryTargetEncoder()),
-        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text)),
+        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text, text_max_features=text_max_features)),
         ("model", RandomForestClassifier(
             random_state=RANDOM_STATE,
             n_jobs=-1,
@@ -200,34 +200,34 @@ def build_rf(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pip
         )),
     ])
 
-def build_knn(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pipeline:
+def build_knn(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_max_features: int = 5000) -> Pipeline:
     from sklearn.neighbors import KNeighborsClassifier
     num_cols = get_numeric_columns(X_sample)
     return Pipeline([
         ("enc",   IndustryTargetEncoder()),
-        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text)),
+        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text, text_max_features=text_max_features)),
         ("model", KNeighborsClassifier(
             n_jobs=-1,
             **params,
         )),
     ])
 
-def build_adaboost(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pipeline:
+def build_adaboost(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_max_features: int = 5000) -> Pipeline:
     num_cols = get_numeric_columns(X_sample)
     return Pipeline([
         ("enc",   IndustryTargetEncoder()),
-        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text)),
+        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text, text_max_features=text_max_features)),
         ("model", AdaBoostClassifier(
             random_state=RANDOM_STATE,
             **params,
         )),
     ])
 
-def build_svm(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pipeline:
+def build_svm(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_max_features: int = 5000) -> Pipeline:
     num_cols = get_numeric_columns(X_sample)
     return Pipeline([
         ("enc",   IndustryTargetEncoder()),
-        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text)),
+        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text, text_max_features=text_max_features)),
         ("model", SVC(
             random_state=RANDOM_STATE,
             probability=True,
@@ -235,7 +235,7 @@ def build_svm(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pi
         )),
     ])
 
-def build_mlp(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pipeline:
+def build_mlp(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_max_features: int = 5000) -> Pipeline:
     # Reconstruct hidden_layer_sizes from dynamic Optuna parameters if present
     model_params = params.copy()
     if "n_layers" in model_params:
@@ -248,7 +248,7 @@ def build_mlp(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pi
     num_cols = get_numeric_columns(X_sample)
     return Pipeline([
         ("enc",   IndustryTargetEncoder()),
-        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text)),
+        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text, text_max_features=text_max_features)),
         ("model", MLPClassifier(
             random_state=RANDOM_STATE,
             max_iter=1000,
@@ -420,6 +420,21 @@ def best_f0_5_threshold(pipeline: Pipeline, X: pd.DataFrame, y: pd.Series) -> fl
     prec, rec, thresholds = precision_recall_curve(y, proba)
     f0_5s = (1 + 0.5**2) * prec * rec / (0.5**2 * prec + rec + 1e-8)
     return float(thresholds[np.argmax(f0_5s[:-1])])
+
+def best_f0_5_threshold_from_proba(y_true: pd.Series, proba: np.ndarray) -> float:
+    """Find the probability threshold that maximizes F0.5 from scores."""
+    prec, rec, thresholds = precision_recall_curve(y_true, proba)
+    f0_5s = (1 + 0.5**2) * prec * rec / (0.5**2 * prec + rec + 1e-8)
+    return float(thresholds[np.argmax(f0_5s[:-1])])
+
+def best_f0_5_threshold_oof(pipeline: Pipeline, X: pd.DataFrame, y: pd.Series, cv: StratifiedKFold) -> float:
+    """Compute an F0.5-optimal threshold using out-of-fold probabilities."""
+    oof_proba = np.zeros(len(y), dtype=float)
+    for tr_idx, va_idx in cv.split(X, y):
+        pipe = clone(pipeline)
+        pipe.fit(X.iloc[tr_idx], y.iloc[tr_idx])
+        oof_proba[va_idx] = pipe.predict_proba(X.iloc[va_idx])[:, 1]
+    return best_f0_5_threshold_from_proba(y, oof_proba)
  
  
 # ─────────────────────────────────────────────
@@ -432,6 +447,7 @@ def train_single(
     tune_hyperparams: bool = True,
     n_trials: int = 50,
     use_text: bool = True,
+    text_max_features: int = 5000,
 ) -> dict:
     """
     Train one model. Returns a result dict with keys:
@@ -457,12 +473,18 @@ def train_single(
  
         def objective(trial):
             params   = reg["search"](trial, pos_weight)
-            pipeline = reg["builder"](params, X, use_text=use_text)
-            scores   = cross_validate(
-                pipeline, X, y, cv=cv,
-                scoring="average_precision", n_jobs=-1,
-            )
-            return scores["test_score"].mean()
+            pipeline = reg["builder"](params, X, use_text=use_text, text_max_features=text_max_features)
+            fold_scores = []
+            for tr_idx, va_idx in cv.split(X, y):
+                pipe = clone(pipeline)
+                X_tr, y_tr = X.iloc[tr_idx], y.iloc[tr_idx]
+                X_va, y_va = X.iloc[va_idx], y.iloc[va_idx]
+                pipe.fit(X_tr, y_tr)
+                proba = pipe.predict_proba(X_va)[:, 1]
+                thr = best_f0_5_threshold_from_proba(y_va, proba)
+                y_pred = (proba >= thr).astype(int)
+                fold_scores.append(fbeta_score(y_va, y_pred, beta=0.5))
+            return float(np.mean(fold_scores))
  
         study = optuna.create_study(
             direction="maximize",
@@ -470,14 +492,14 @@ def train_single(
         )
         study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
         best_params = study.best_params
-        print(f"  Best avg-precision (CV): {study.best_value:.4f}")
+        print(f"  Best F0.5 (CV): {study.best_value:.4f}")
     else:
         best_params = reg["default_params"](pos_weight)
         study = None
         print("  Using default params.")
  
     # CV evaluation
-    pipeline   = reg["builder"](best_params, X, use_text=use_text)
+    pipeline   = reg["builder"](best_params, X, use_text=use_text, text_max_features=text_max_features)
     cv_summary = evaluate_cv(pipeline, X, y)
  
     print(f"\n  {'Metric':<12} {'Test mean':>10} {'+/-std':>8} {'Train mean':>12}")
@@ -489,7 +511,11 @@ def train_single(
     # Final fit
     pipeline.fit(X, y)
     joblib.dump(pipeline, MODELS_DIR / f"{model_name}.pkl")
+    oof_threshold = best_f0_5_threshold_oof(pipeline, X, y, cv)
+    with open(MODELS_DIR / f"{model_name}_threshold.json", "w") as f:
+        json.dump({"threshold": oof_threshold}, f, indent=2)
     print(f"\n  Saved -> models/{model_name}.pkl")
+    print(f"  Saved -> models/{model_name}_threshold.json (threshold={oof_threshold:.3f})")
 
  
     return {
@@ -500,6 +526,7 @@ def train_single(
         "study":       study,
         "X":           X,
         "y":           y,
+        "threshold":   oof_threshold,
     }
  
  
@@ -513,6 +540,7 @@ def train_all(
     tune_hyperparams: bool = True,
     n_trials: int = 50,
     use_text: bool = True,
+    text_max_features: int = 5000,
 ) -> dict[str, dict]:
     """
     Train all (or a subset of) models on the same records.
@@ -531,7 +559,10 @@ def train_all(
     models = models or list(MODEL_REGISTRY.keys())
     results = {}
     for name in models:
-        results[name] = train_single(name, records, tune_hyperparams, n_trials, use_text=use_text)
+        results[name] = train_single(
+            name, records, tune_hyperparams, n_trials,
+            use_text=use_text, text_max_features=text_max_features
+        )
     
     if len(results) >= 2:
         from training_pipeline import add_stacking_ensemble
@@ -616,7 +647,14 @@ def compare_models(
         proba    = pipeline.predict_proba(X_test)[:, 1]
         probas[name] = proba
  
-        threshold = best_f0_5_threshold(pipeline, X_test, y_test)
+        threshold = res.get("threshold")
+        if threshold is None:
+            threshold_path = MODELS_DIR / f"{name}_threshold.json"
+            if threshold_path.exists():
+                with open(threshold_path, "r") as f:
+                    threshold = float(json.load(f).get("threshold", 0.5))
+            else:
+                threshold = best_f0_5_threshold(pipeline, X_test, y_test)
         y_pred    = (proba >= threshold).astype(int)
  
         rows.append({
