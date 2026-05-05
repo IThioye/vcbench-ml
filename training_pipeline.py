@@ -632,7 +632,7 @@ def add_stacking_ensemble(results: dict, records: list[dict]):
     stack.fit(X, y)
     
     # Evaluation
-    cv_summary = evaluate_cv(stack, X, y)
+    cv_summary, cv_folds = evaluate_cv(stack, X, y)
     
     # Save
     joblib.dump(stack, MODELS_DIR / "ensemble_stack.pkl")
@@ -642,6 +642,7 @@ def add_stacking_ensemble(results: dict, records: list[dict]):
         "model_name":  "ensemble_stack",
         "pipeline":    stack,
         "cv_summary":  cv_summary,
+        "cv_folds":    cv_folds,
         "best_params": {"final_estimator": "LogisticRegression"},
         "study":       None,
         "X":           X,
