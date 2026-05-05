@@ -1,8 +1,7 @@
 """
 training_pipeline.py
 ───────────────────────
-Trains XGBoost, AdaBoost, LightGBM, Logistic Regression, Random Forest, 
-and Neural Network
+Trains Logistic Regression, Random Forest, and AdaBoost
 on the founder-success dataset with Optuna tuning, shared CV evaluation,
 and a head-to-head comparison report.
  
@@ -20,7 +19,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
  
-from sklearn.model_selection import StratifiedKFold, cross_validate, learning_curve
+from sklearn.model_selection import StratifiedKFold, learning_curve
 from sklearn.preprocessing import TargetEncoder, StandardScaler
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.compose import ColumnTransformer
@@ -55,7 +54,7 @@ from feature_engineering import build_feature_dataframe
  
 TARGET       = "success"
 ID_COL       = "founder_uuid"
-CV_FOLDS     = 5
+CV_FOLDS     = 3
 RANDOM_STATE = 42
 MODELS_DIR   = Path("models")
 MODELS_DIR.mkdir(exist_ok=True)
@@ -354,31 +353,14 @@ def mlp_search_space(trial: optuna.Trial, pos_weight: float) -> dict:
 # ─────────────────────────────────────────────
  
 MODEL_REGISTRY = {
-    "xgboost":   {"builder": build_xgb,    "search": xgb_search_space,    "default_params": lambda pw: {
-        "n_estimators": 300, "max_depth": 4, "learning_rate": 0.05,
-        "subsample": 0.8, "colsample_bytree": 0.8, "scale_pos_weight": pw,
-    }},
-    "lightgbm":  {"builder": build_lgbm,   "search": lgbm_search_space,   "default_params": lambda pw: {
-        "n_estimators": 300, "max_depth": 4, "learning_rate": 0.05,
-        "num_leaves": 31, "scale_pos_weight": pw,
-    }},
     "logreg":    {"builder": build_logreg, "search": logreg_search_space,  "default_params": lambda pw: {
         "C": 1.0, "penalty": "l2", "solver": "lbfgs", "class_weight": "balanced",
     }},
     "random_forest": {"builder": build_rf, "search": rf_search_space,      "default_params": lambda pw: {
         "n_estimators": 300, "max_depth": 8, "class_weight": "balanced",
     }},
-    "knn": {"builder": build_knn, "search": knn_search_space, "default_params": lambda pw: {
-        "n_neighbors": 5, "weights": "uniform", "p": 2,
-    }},
     "adaboost": {"builder": build_adaboost, "search": adaboost_search_space, "default_params": lambda pw: {
         "n_estimators": 100, "learning_rate": 0.1,
-    }},
-    "svm": {"builder": build_svm, "search": svm_search_space, "default_params": lambda pw: {
-        "C": 1.0, "kernel": "rbf", "gamma": "scale",
-    }},
-    "mlp": {"builder": build_mlp, "search": mlp_search_space, "default_params": lambda pw: {
-        "hidden_layer_sizes": (64, 32), "activation": "relu", "solver": "adam", "alpha": 0.0001,
     }},
 }
  
@@ -387,28 +369,64 @@ MODEL_REGISTRY = {
 # Shared: CV evaluation
 # ─────────────────────────────────────────────
  
-def evaluate_cv(pipeline: Pipeline, X: pd.DataFrame, y: pd.Series) -> dict:
+def evaluate_cv(pipeline: Pipeline, X: pd.DataFrame, y: pd.Series) -> tuple[dict, list[dict]]:
+    """Evaluate with benchmark-aligned 3-fold stratified CV using fold-specific F0.5 thresholds."""
     cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
-    from sklearn.metrics import make_scorer, fbeta_score
-    scoring = {
-        "roc_auc":   "roc_auc",
-        "avg_prec":  "average_precision",
-        "f0.5":      make_scorer(fbeta_score, beta=0.5),
-        "precision": "precision",
-        "recall":    "recall",
+
+    fold_metrics = {
+        "roc_auc": {"train": [], "test": []},
+        "avg_prec": {"train": [], "test": []},
+        "f0.5": {"train": [], "test": []},
+        "precision": {"train": [], "test": []},
+        "recall": {"train": [], "test": []},
     }
-    results = cross_validate(
-        pipeline, X, y, cv=cv, scoring=scoring,
-        n_jobs=-1, return_train_score=True,
-    )
+
+    fold_reports = []
+
+    for fold_idx, (tr_idx, va_idx) in enumerate(cv.split(X, y), start=1):
+        pipe = clone(pipeline)
+        X_tr, y_tr = X.iloc[tr_idx], y.iloc[tr_idx]
+        X_va, y_va = X.iloc[va_idx], y.iloc[va_idx]
+
+        pipe.fit(X_tr, y_tr)
+
+        tr_proba = pipe.predict_proba(X_tr)[:, 1]
+        va_proba = pipe.predict_proba(X_va)[:, 1]
+
+        thr = best_f0_5_threshold_from_proba(y_va, va_proba)
+        tr_pred = (tr_proba >= thr).astype(int)
+        va_pred = (va_proba >= thr).astype(int)
+
+        fold_metrics["roc_auc"]["train"].append(roc_auc_score(y_tr, tr_proba))
+        fold_metrics["roc_auc"]["test"].append(roc_auc_score(y_va, va_proba))
+        fold_metrics["avg_prec"]["train"].append(average_precision_score(y_tr, tr_proba))
+        fold_metrics["avg_prec"]["test"].append(average_precision_score(y_va, va_proba))
+
+        fold_metrics["f0.5"]["train"].append(fbeta_score(y_tr, tr_pred, beta=0.5, zero_division=0))
+        fold_metrics["f0.5"]["test"].append(fbeta_score(y_va, va_pred, beta=0.5, zero_division=0))
+        fold_metrics["precision"]["train"].append(precision_score(y_tr, tr_pred, zero_division=0))
+        fold_metrics["precision"]["test"].append(precision_score(y_va, va_pred, zero_division=0))
+        fold_metrics["recall"]["train"].append(recall_score(y_tr, tr_pred, zero_division=0))
+        fold_metrics["recall"]["test"].append(recall_score(y_va, va_pred, zero_division=0))
+
+        fold_reports.append({
+            "fold": fold_idx,
+            "n_train": int(len(tr_idx)),
+            "n_valid": int(len(va_idx)),
+            "positive_rate_valid": round(float(y_va.mean()), 4),
+            "threshold": round(float(thr), 6),
+            "f0.5": round(float(fold_metrics["f0.5"]["test"][-1]), 4),
+            "precision": round(float(fold_metrics["precision"]["test"][-1]), 4),
+            "recall": round(float(fold_metrics["recall"]["test"][-1]), 4),
+        })
     summary = {}
-    for metric in scoring:
+    for metric, vals in fold_metrics.items():
         summary[metric] = {
-            "test_mean":  round(float(results[f"test_{metric}"].mean()),  4),
-            "test_std":   round(float(results[f"test_{metric}"].std()),   4),
-            "train_mean": round(float(results[f"train_{metric}"].mean()), 4),
+            "test_mean": round(float(np.mean(vals["test"])), 4),
+            "test_std": round(float(np.std(vals["test"])), 4),
+            "train_mean": round(float(np.mean(vals["train"])), 4),
         }
-    return summary
+    return summary, fold_reports
  
  
 # ─────────────────────────────────────────────
@@ -430,7 +448,9 @@ def best_f0_5_threshold_from_proba(y_true: pd.Series, proba: np.ndarray) -> floa
 def best_f0_5_threshold_oof(pipeline: Pipeline, X: pd.DataFrame, y: pd.Series, cv: StratifiedKFold) -> float:
     """Compute an F0.5-optimal threshold using out-of-fold probabilities."""
     oof_proba = np.zeros(len(y), dtype=float)
-    for tr_idx, va_idx in cv.split(X, y):
+    fold_reports = []
+
+    for fold_idx, (tr_idx, va_idx) in enumerate(cv.split(X, y), start=1):
         pipe = clone(pipeline)
         pipe.fit(X.iloc[tr_idx], y.iloc[tr_idx])
         oof_proba[va_idx] = pipe.predict_proba(X.iloc[va_idx])[:, 1]
@@ -500,7 +520,7 @@ def train_single(
  
     # CV evaluation
     pipeline   = reg["builder"](best_params, X, use_text=use_text, text_max_features=text_max_features)
-    cv_summary = evaluate_cv(pipeline, X, y)
+    cv_summary, cv_folds = evaluate_cv(pipeline, X, y)
  
     print(f"\n  {'Metric':<12} {'Test mean':>10} {'+/-std':>8} {'Train mean':>12}")
 
@@ -508,14 +528,26 @@ def train_single(
     for m, v in cv_summary.items():
         print(f"  {m:<12} {v['test_mean']:>10.4f} {v['test_std']:>8.4f} {v['train_mean']:>12.4f}")
  
+    print("\n  Out-of-sample (validation) fold metrics")
+    print(f"  {'Fold':<6} {'N_valid':>8} {'Pos%':>8} {'Thr':>10} {'F0.5':>8} {'Prec':>8} {'Rec':>8}")
+    print(f"  {'-'*64}")
+    for fold in cv_folds:
+        print(
+            f"  {fold['fold']:<6} {fold['n_valid']:>8} {fold['positive_rate_valid']*100:>7.2f}%"
+            f" {fold['threshold']:>10.4f} {fold['f0.5']:>8.4f} {fold['precision']:>8.4f} {fold['recall']:>8.4f}"
+        )
+
     # Final fit
     pipeline.fit(X, y)
     joblib.dump(pipeline, MODELS_DIR / f"{model_name}.pkl")
     oof_threshold = best_f0_5_threshold_oof(pipeline, X, y, cv)
     with open(MODELS_DIR / f"{model_name}_threshold.json", "w") as f:
         json.dump({"threshold": oof_threshold}, f, indent=2)
+    with open(MODELS_DIR / f"{model_name}_cv_report.json", "w") as f:
+        json.dump({"summary": cv_summary, "folds": cv_folds}, f, indent=2)
     print(f"\n  Saved -> models/{model_name}.pkl")
     print(f"  Saved -> models/{model_name}_threshold.json (threshold={oof_threshold:.3f})")
+    print(f"  Saved -> models/{model_name}_cv_report.json")
 
  
     return {
@@ -527,6 +559,7 @@ def train_single(
         "X":           X,
         "y":           y,
         "threshold":   oof_threshold,
+        "cv_folds":    cv_folds,
     }
  
  
@@ -962,7 +995,7 @@ def plot_confusion_matrix(pipeline: Pipeline, X: pd.DataFrame, y: pd.Series,
 # Inference helper (any saved model)
 # ─────────────────────────────────────────────
  
-def predict(records: list[dict], model_name: str = "xgboost") -> pd.DataFrame:
+def predict(records: list[dict], model_name: str = "logreg") -> pd.DataFrame:
     """Load a saved pipeline and return predictions for new records."""
     pipeline = joblib.load(MODELS_DIR / f"{model_name}.pkl")
     X, _, ids = load_data(records)
