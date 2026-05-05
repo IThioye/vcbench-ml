@@ -141,10 +141,38 @@ def main():
 def run_benchmark_submission(results, test_records, output_dir):
     """Generate a binary submission CSV for the private benchmark set."""
     print("\nGenerating benchmark submission...")
-    from training_pipeline import load_data
+    from training_pipeline import load_data, plot_metric_comparison
     X_private, _, ids_private = load_data(test_records)
     
-    # AUTOMATIC SELECTION: Pick best model based on CV Average Precision (test_mean)
+    # Generate CV metric comparison table
+    print("\nGenerating CV metric comparison...")
+    rows = []
+    for name, res in results.items():
+        summary = res["cv_summary"]
+        rows.append({
+            "model": name,
+            "auc_roc": round(summary["roc_auc"]["test_mean"], 4),
+            "auc_pr": round(summary["avg_prec"]["test_mean"], 4),
+            "f0.5": round(summary["f0.5"]["test_mean"], 4),
+            "precision": round(summary["precision"]["test_mean"], 4),
+            "recall": round(summary["recall"]["test_mean"], 4)
+        })
+    comparison_df = pd.DataFrame(rows).set_index("model").sort_values("f0.5", ascending=False)
+    
+    print("\n" + "="*72)
+    print("  MODEL COMPARISON - Cross-Validation (Benchmark Mode)")
+    print("="*72)
+    print(comparison_df.to_string())
+    print("="*72)
+    
+    cv_comp_path = output_dir / "cv_comparison_metrics.csv"
+    comparison_df.to_csv(cv_comp_path)
+    print(f"CV Comparison table saved to {cv_comp_path}")
+    
+    # Plot metric comparison (Precision, Recall, F0.5)
+    plot_metric_comparison(comparison_df, output_dir / "metrics_comparison")
+    
+    # AUTOMATIC SELECTION: Pick best model based on CV F0.5 (test_mean)
     best_name = max(results.keys(), key=lambda k: results[k]["cv_summary"]["f0.5"]["test_mean"])
     
     print(f"Automatically selected best model based on CV: '{best_name}'")

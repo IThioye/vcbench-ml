@@ -35,8 +35,6 @@ from sklearn.metrics import (
     confusion_matrix, ConfusionMatrixDisplay
 )
 from sklearn.base import BaseEstimator, TransformerMixin, clone
-import xgboost as xgb
-import lightgbm as lgb
 import optuna
 from optuna.samplers import TPESampler
 import joblib
@@ -134,40 +132,9 @@ def get_numeric_columns(X: pd.DataFrame) -> list[str]:
 
 # ─────────────────────────────────────────────
 # Per-model pipeline builders
-# ─────────────────────────────────────────────
+# ───────────────────────────────────────────── 
  
-def build_xgb(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_max_features: int = 5000) -> Pipeline:
-    num_cols = get_numeric_columns(X_sample)
-    return Pipeline([
-        ("enc",   IndustryTargetEncoder()),
-        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text, text_max_features=text_max_features)),
-        ("model", xgb.XGBClassifier(
-            objective="binary:logistic",
-            eval_metric="aucpr",
-            random_state=RANDOM_STATE,
-            n_jobs=-1,
-            **params,
-        )),
-    ])
- 
- 
-def build_lgbm(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_max_features: int = 5000) -> Pipeline:
-    num_cols = get_numeric_columns(X_sample)
-    return Pipeline([
-        ("enc",   IndustryTargetEncoder()),
-        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text, text_max_features=text_max_features)),
-        ("model", lgb.LGBMClassifier(
-            objective="binary",
-            metric="average_precision",
-            random_state=RANDOM_STATE,
-            n_jobs=-1,
-            verbose=-1,
-            **params,
-        )),
-    ])
- 
- 
-def build_logreg(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_max_features: int = 5000) -> Pipeline:
+def build_logreg(params: dict, X_sample: pd.DataFrame, use_text: bool = False, text_max_features: int = 5000) -> Pipeline:
     # Handle Optuna artifacts (e.g., penalty_saga)
     model_params = params.copy()
     if "penalty_saga" in model_params:
@@ -187,7 +154,7 @@ def build_logreg(params: dict, X_sample: pd.DataFrame, use_text: bool = True, te
 
  
  
-def build_rf(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_max_features: int = 5000) -> Pipeline:
+def build_rf(params: dict, X_sample: pd.DataFrame, use_text: bool = False, text_max_features: int = 5000) -> Pipeline:
     num_cols = get_numeric_columns(X_sample)
     return Pipeline([
         ("enc",   IndustryTargetEncoder()),
@@ -199,19 +166,9 @@ def build_rf(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_m
         )),
     ])
 
-def build_knn(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_max_features: int = 5000) -> Pipeline:
-    from sklearn.neighbors import KNeighborsClassifier
-    num_cols = get_numeric_columns(X_sample)
-    return Pipeline([
-        ("enc",   IndustryTargetEncoder()),
-        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text, text_max_features=text_max_features)),
-        ("model", KNeighborsClassifier(
-            n_jobs=-1,
-            **params,
-        )),
-    ])
 
-def build_adaboost(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_max_features: int = 5000) -> Pipeline:
+
+def build_adaboost(params: dict, X_sample: pd.DataFrame, use_text: bool = False, text_max_features: int = 5000) -> Pipeline:
     num_cols = get_numeric_columns(X_sample)
     return Pipeline([
         ("enc",   IndustryTargetEncoder()),
@@ -234,7 +191,7 @@ def build_svm(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_
         )),
     ])
 
-def build_mlp(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_max_features: int = 5000) -> Pipeline:
+def build_mlp(params: dict, X_sample: pd.DataFrame, use_text: bool = True) -> Pipeline:
     # Reconstruct hidden_layer_sizes from dynamic Optuna parameters if present
     model_params = params.copy()
     if "n_layers" in model_params:
@@ -247,49 +204,19 @@ def build_mlp(params: dict, X_sample: pd.DataFrame, use_text: bool = True, text_
     num_cols = get_numeric_columns(X_sample)
     return Pipeline([
         ("enc",   IndustryTargetEncoder()),
-        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text, text_max_features=text_max_features)),
+        ("prep",  get_hybrid_preprocessor(num_cols, use_text=use_text)),
         ("model", MLPClassifier(
             random_state=RANDOM_STATE,
             max_iter=1000,
             **model_params,
         )),
     ])
-
  
 # ─────────────────────────────────────────────
 # Per-model Optuna search spaces
 # ─────────────────────────────────────────────
  
-def xgb_search_space(trial: optuna.Trial, pos_weight: float) -> dict:
-    return {
-        "n_estimators":     trial.suggest_int("n_estimators", 100, 800),
-        "max_depth":        trial.suggest_int("max_depth", 3, 8),
-        "learning_rate":    trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
-        "subsample":        trial.suggest_float("subsample", 0.5, 1.0),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-        "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
-        "gamma":            trial.suggest_float("gamma", 0.0, 5.0),
-        "reg_alpha":        trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
-        "reg_lambda":       trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
-        "scale_pos_weight": trial.suggest_float("scale_pos_weight", 1.0, pos_weight * 1.5),
-    }
- 
- 
-def lgbm_search_space(trial: optuna.Trial, pos_weight: float) -> dict:
-    return {
-        "n_estimators":    trial.suggest_int("n_estimators", 100, 800),
-        "max_depth":       trial.suggest_int("max_depth", 3, 8),
-        "learning_rate":   trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
-        "num_leaves":      trial.suggest_int("num_leaves", 15, 127),
-        "subsample":       trial.suggest_float("subsample", 0.5, 1.0),
-        "colsample_bytree":trial.suggest_float("colsample_bytree", 0.5, 1.0),
-        "min_child_samples":trial.suggest_int("min_child_samples", 5, 50),
-        "reg_alpha":       trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
-        "reg_lambda":      trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
-        "scale_pos_weight":trial.suggest_float("scale_pos_weight", 1.0, pos_weight * 1.5),
-    }
- 
- 
+
 def logreg_search_space(trial: optuna.Trial, pos_weight: float) -> dict:
     solver = trial.suggest_categorical("solver", ["lbfgs", "saga"])
     if solver == "saga":
@@ -313,12 +240,6 @@ def rf_search_space(trial: optuna.Trial, pos_weight: float) -> dict:
         "class_weight":   trial.suggest_categorical("class_weight", ["balanced", "balanced_subsample", None]),
     }
 
-def knn_search_space(trial: optuna.Trial, pos_weight: float) -> dict:
-    return {
-        "n_neighbors": trial.suggest_int("n_neighbors", 3, 15),
-        "weights":     trial.suggest_categorical("weights", ["uniform", "distance"]),
-        "p":           trial.suggest_categorical("p", [1, 2]),
-    }
 
 def adaboost_search_space(trial: optuna.Trial, pos_weight: float) -> dict:
     return {
@@ -347,7 +268,6 @@ def mlp_search_space(trial: optuna.Trial, pos_weight: float) -> dict:
         "learning_rate": trial.suggest_categorical("learning_rate", ["constant", "adaptive"]),
     }
  
- 
 # ─────────────────────────────────────────────
 # Model registry
 # ─────────────────────────────────────────────
@@ -362,6 +282,12 @@ MODEL_REGISTRY = {
     "adaboost": {"builder": build_adaboost, "search": adaboost_search_space, "default_params": lambda pw: {
         "n_estimators": 100, "learning_rate": 0.1,
     }},
+    "svm": {"builder": build_svm, "search": svm_search_space, "default_params": lambda pw: {
+        "C": 1.0, "kernel": "rbf", "gamma": "scale",
+    }},
+    "mlp": {"builder": build_mlp, "search": mlp_search_space, "default_params": lambda pw: {
+        "hidden_layer_sizes": (64, 32), "activation": "relu", "solver": "adam", "alpha": 0.0001,
+    }}
 }
  
  
@@ -488,12 +414,10 @@ def train_single(
     cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
  
     if tune_hyperparams:
-        print(f"  Optuna search ({n_trials} trials) ...")
-
- 
+        print(f"  Optuna search ({n_trials} trials) ...") 
         def objective(trial):
             params   = reg["search"](trial, pos_weight)
-            pipeline = reg["builder"](params, X, use_text=use_text, text_max_features=text_max_features)
+            pipeline = reg["builder"](params, X, use_text=use_text)
             fold_scores = []
             for tr_idx, va_idx in cv.split(X, y):
                 pipe = clone(pipeline)
@@ -519,7 +443,7 @@ def train_single(
         print("  Using default params.")
  
     # CV evaluation
-    pipeline   = reg["builder"](best_params, X, use_text=use_text, text_max_features=text_max_features)
+    pipeline   = reg["builder"](best_params, X, use_text=use_text)
     cv_summary, cv_folds = evaluate_cv(pipeline, X, y)
  
     print(f"\n  {'Metric':<12} {'Test mean':>10} {'+/-std':>8} {'Train mean':>12}")
@@ -529,13 +453,13 @@ def train_single(
         print(f"  {m:<12} {v['test_mean']:>10.4f} {v['test_std']:>8.4f} {v['train_mean']:>12.4f}")
  
     print("\n  Out-of-sample (validation) fold metrics")
-    print(f"  {'Fold':<6} {'N_valid':>8} {'Pos%':>8} {'Thr':>10} {'F0.5':>8} {'Prec':>8} {'Rec':>8}")
-    print(f"  {'-'*64}")
+    print(f"  {'Fold':<6} {'F0.5':>8} {'Prec':>8} {'Rec':>8}")
+    print(f"  ----------------------------------")
     for fold in cv_folds:
         print(
-            f"  {fold['fold']:<6} {fold['n_valid']:>8} {fold['positive_rate_valid']*100:>7.2f}%"
-            f" {fold['threshold']:>10.4f} {fold['f0.5']:>8.4f} {fold['precision']:>8.4f} {fold['recall']:>8.4f}"
+            f"  {fold['fold']:<6} {fold['f0.5']:>8.4f} {fold['precision']:>8.4f} {fold['recall']:>8.4f}"
         )
+    print(f'  Mean   {cv_summary["f0.5"]["test_mean"]:>8.4f} {cv_summary["precision"]["test_mean"]:>8.4f} {cv_summary["recall"]["test_mean"]:>8.4f}')
 
     # Final fit
     pipeline.fit(X, y)
@@ -592,11 +516,12 @@ def train_all(
     models = models or list(MODEL_REGISTRY.keys())
     results = {}
     for name in models:
+        use_text = True if name in ["mlp", "svm"] else False 
         results[name] = train_single(
             name, records, tune_hyperparams, n_trials,
             use_text=use_text, text_max_features=text_max_features
         )
-    
+
     if len(results) >= 2:
         from training_pipeline import add_stacking_ensemble
         results = add_stacking_ensemble(results, records)
@@ -619,7 +544,7 @@ def add_stacking_ensemble(results: dict, records: list[dict]):
     estimators = [
         (name, res["pipeline"]) 
         for name, res in results.items() 
-        if name != "ensemble_stack"
+        if name not in ["ensemble_stack", "mlp", "svm"]
     ]
     
     stack = StackingClassifier(
@@ -632,8 +557,23 @@ def add_stacking_ensemble(results: dict, records: list[dict]):
     stack.fit(X, y)
     
     # Evaluation
-    cv_summary = evaluate_cv(stack, X, y)
-    
+    cv_summary, cv_folds = evaluate_cv(stack, X, y)
+
+    print(f"\n  {'Metric':<12} {'Test mean':>10} {'+/-std':>8} {'Train mean':>12}")
+
+    print(f"  {'-'*44}")
+    for m, v in cv_summary.items():
+        print(f"  {m:<12} {v['test_mean']:>10.4f} {v['test_std']:>8.4f} {v['train_mean']:>12.4f}")
+ 
+    print("\n  Out-of-sample (validation) fold metrics")
+    print(f"  {'Fold':<6} {'F0.5':>8} {'Prec':>8} {'Rec':>8}")
+    print(f"  ----------------------------------")
+    for fold in cv_folds:
+        print(
+            f"  {fold['fold']:<6} {fold['f0.5']:>8.4f} {fold['precision']:>8.4f} {fold['recall']:>8.4f}"
+        )
+    print(f'  Mean   {cv_summary["f0.5"]["test_mean"]:>8.4f} {cv_summary["precision"]["test_mean"]:>8.4f} {cv_summary["recall"]["test_mean"]:>8.4f}')
+
     # Save
     joblib.dump(stack, MODELS_DIR / "ensemble_stack.pkl")
     print(f"\n  Saved -> models/ensemble_stack.pkl")
@@ -642,6 +582,7 @@ def add_stacking_ensemble(results: dict, records: list[dict]):
         "model_name":  "ensemble_stack",
         "pipeline":    stack,
         "cv_summary":  cv_summary,
+        "cv_folds":    cv_folds,
         "best_params": {"final_estimator": "LogisticRegression"},
         "study":       None,
         "X":           X,

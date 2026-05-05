@@ -12,7 +12,7 @@ import argparse
 # ─────────────────────────────────────────────
 DATA_PATH = Path("data/vcbench_final_public.csv")
 OUTPUT_DIR = Path("research_results/ablation_study")
-MODELS = ["logreg", "xgboost", "random_forest", "lightgbm", "knn", "adaboost", "svm", "mlp"]
+MODELS = ["logreg","random_forest","adaboost","svm","mlp"]
 
 def run_ablation(n_trials=2):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
