@@ -1,8 +1,7 @@
 """
 training_pipeline.py
 ───────────────────────
-Trains XGBoost, AdaBoost, LightGBM, Logistic Regression, Random Forest, 
-and Neural Network
+Trains Logistic Regression, Random Forest, and AdaBoost
 on the founder-success dataset with Optuna tuning, shared CV evaluation,
 and a head-to-head comparison report.
  
@@ -354,31 +353,14 @@ def mlp_search_space(trial: optuna.Trial, pos_weight: float) -> dict:
 # ─────────────────────────────────────────────
  
 MODEL_REGISTRY = {
-    "xgboost":   {"builder": build_xgb,    "search": xgb_search_space,    "default_params": lambda pw: {
-        "n_estimators": 300, "max_depth": 4, "learning_rate": 0.05,
-        "subsample": 0.8, "colsample_bytree": 0.8, "scale_pos_weight": pw,
-    }},
-    "lightgbm":  {"builder": build_lgbm,   "search": lgbm_search_space,   "default_params": lambda pw: {
-        "n_estimators": 300, "max_depth": 4, "learning_rate": 0.05,
-        "num_leaves": 31, "scale_pos_weight": pw,
-    }},
     "logreg":    {"builder": build_logreg, "search": logreg_search_space,  "default_params": lambda pw: {
         "C": 1.0, "penalty": "l2", "solver": "lbfgs", "class_weight": "balanced",
     }},
     "random_forest": {"builder": build_rf, "search": rf_search_space,      "default_params": lambda pw: {
         "n_estimators": 300, "max_depth": 8, "class_weight": "balanced",
     }},
-    "knn": {"builder": build_knn, "search": knn_search_space, "default_params": lambda pw: {
-        "n_neighbors": 5, "weights": "uniform", "p": 2,
-    }},
     "adaboost": {"builder": build_adaboost, "search": adaboost_search_space, "default_params": lambda pw: {
         "n_estimators": 100, "learning_rate": 0.1,
-    }},
-    "svm": {"builder": build_svm, "search": svm_search_space, "default_params": lambda pw: {
-        "C": 1.0, "kernel": "rbf", "gamma": "scale",
-    }},
-    "mlp": {"builder": build_mlp, "search": mlp_search_space, "default_params": lambda pw: {
-        "hidden_layer_sizes": (64, 32), "activation": "relu", "solver": "adam", "alpha": 0.0001,
     }},
 }
  
@@ -1013,7 +995,7 @@ def plot_confusion_matrix(pipeline: Pipeline, X: pd.DataFrame, y: pd.Series,
 # Inference helper (any saved model)
 # ─────────────────────────────────────────────
  
-def predict(records: list[dict], model_name: str = "xgboost") -> pd.DataFrame:
+def predict(records: list[dict], model_name: str = "logreg") -> pd.DataFrame:
     """Load a saved pipeline and return predictions for new records."""
     pipeline = joblib.load(MODELS_DIR / f"{model_name}.pkl")
     X, _, ids = load_data(records)
