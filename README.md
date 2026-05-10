@@ -1,68 +1,151 @@
-# VCBench: Predicting Founder Success with Hybrid Semantic-Numeric Features
+# VCBench ML — Prédiction du succès des fondateurs
 
-This repository contains a predictive modeling pipeline designed for the **VCBench** competition. The project implements a state-of-the-art approach that combines traditional numeric financial indicators with semantic text features extracted from founder and startup profiles.
+Ce dépôt contient un pipeline de **machine learning appliqué au scoring de fondateurs/startups** dans le cadre du challenge **VCBench**.  
+L’objectif est de prédire la variable binaire `success` à partir de données structurées (expérience, éducation, exits, industrie) enrichies par des signaux sémantiques (TF‑IDF sur résumé texte).
 
-## Key Features
+## Vue d’ensemble
 
-- **Hybrid Preprocessing**: Seamlessly integrates numeric data scaling with TF-IDF semantic mining of text summaries.
-- **Automated Model Selection**: Programmatically identifies the best-performing architecture (XGBoost, LightGBM, Random Forest, Logistic Regression, or Stacking Ensemble) using Cross-Validation Average Precision.
-- **Threshold Optimization**: Maximizes the **F0.5 score** by dynamically calculating the optimal probability threshold, prioritizing precision over recall for venture capital decision support.
-- **Dual-Mode Execution**: 
-    - **Research Mode**: Comprehensive diagnostics, learning curves, and feature importance analysis on a train/test split.
-    - **Benchmark Mode**: Full-dataset training and binary prediction generation for competition submission.
-- **Ablation Study**: Integrated scripts to quantify the performance lift provided by semantic features compared to numeric baselines.
+Le projet propose :
 
-## Project Structure
+- un **feature engineering métier** à partir de champs imbriqués (JSON-like) ;
+- un entraînement multi-modèles avec **optimisation Optuna** ;
+- une comparaison sur des métriques orientées classification déséquilibrée (AUC-PR, F0.5, précision, rappel) ;
+- deux modes d’exécution :
+  - **research** : analyse détaillée et diagnostics ;
+  - **benchmark** : entraînement final + génération de `submission.csv`.
+
+## Structure du dépôt
 
 ```text
-├── data/                  # Datasets (Public and Private)
-├── models/                # Local storage for trained .pkl models
-├── research_results/      # Diagnostic plots, metrics, and ablation assets
-├── benchmark_results/     # Final submission.csv and production models
-├── training_pipeline.py   # Core model logic and CV evaluation
-├── feature_engineering.py # Feature extraction and TF-IDF logic
-├── run_research.py        # Main entry point (Research & Benchmark modes)
-└── run_ablation_study.py  # Script for text vs numeric comparison
+├── data/                        # Jeux public/privé (non versionnés selon votre setup)
+├── models/                      # Modèles sérialisés (.pkl)
+├── research_results/            # Sorties diagnostics (courbes, tableaux, ablation)
+├── benchmark_results/           # Soumissions et artefacts du mode benchmark
+├── feature_engineering.py       # Construction des features numériques + text_summary
+├── training_pipeline.py         # Entraînement, CV, sélection et comparaison de modèles
+├── run_research.py              # Point d’entrée principal (research / benchmark)
+├── run_ablation_study.py        # Étude baseline (numérique) vs hybride (numérique + texte)
+└── requirements.txt             # Dépendances Python
 ```
+
+## Données attendues
+
+Le script principal lit par défaut :
+
+- `data/vcbench_final_public.csv` (train / public),
+- `data/vcbench_final_private.csv` (test privé pour la soumission en mode benchmark).
+
+Colonnes importantes utilisées par le pipeline :
+
+- Identifiant : `founder_uuid`
+- Cible (si disponible) : `success`
+- Champs bruts pour feature engineering : `industry`, `educations_json`, `jobs_json`, `ipos`, `acquisitions`
+
+> En mode benchmark, le fichier privé peut ne pas contenir `success` (inférence uniquement).
 
 ## Installation
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/IThioye/vcbench-ml.git
-   cd vcbench-ml
-   ```
+```bash
+git clone https://github.com/IThioye/vcbench-ml.git
+cd vcbench-ml
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-   *(Ensure you have `xgboost`, `lightgbm`, `optuna`, `scikit-learn`, `pandas`, and `matplotlib` installed.)*
+## Comment utiliser le repo
 
-## Usage
+### 1) Lancer une analyse complète (mode research)
 
-### 1. Research & Diagnostic Mode
-Use this mode to evaluate model performance, check for overfitting, and view feature importances.
+Ce mode fait un split train/test, entraîne plusieurs modèles, compare les performances, génère des graphes et sauvegarde un meilleur modèle.
+
 ```bash
 python run_research.py --mode research --n_trials 50
 ```
 
-### 2. Benchmark Submission Mode
-Use this mode to train on the entire public dataset and generate a binary `submission.csv` for the private benchmark.
+Sorties principales :
+
+- `research_results/comparison_metrics.csv`
+- `research_results/model_comparison_summary.png`
+- dossiers de visualisations (importance, learning curves, confusion matrices)
+- `research_results/research_summary.json`
+- `research_results/best_model-<nom_modele>.pkl`
+
+### 2) Générer une soumission (mode benchmark)
+
+Ce mode entraîne sur tout le dataset public, sélectionne automatiquement le meilleur modèle via CV (`f0.5`), calcule un seuil optimal, puis produit une soumission binaire.
+
 ```bash
-python run_research.py --mode benchmark --n_trials 20
+python run_research.py --mode benchmark --n_trials 20 --private_data data/vcbench_final_private.csv
 ```
 
-### 3. Running the Ablation Study
-To compare the performance with and without semantic text features:
+Sorties principales :
+
+- `benchmark_results/submission.csv`
+- `benchmark_results/cv_comparison_metrics.csv`
+- `benchmark_results/best_model-<nom_modele>.pkl`
+
+### 3) Activer/désactiver les features texte
+
+Par défaut, le texte est activé (`--use_text`). Vous pouvez comparer rapidement :
+
+```bash
+python run_research.py --mode research --n_trials 20 --no_text
+```
+
+### 4) Lancer l’étude d’ablation
+
+Compare explicitement :
+
+- **Baseline** = variables numériques uniquement
+- **Hybrid** = numériques + TF‑IDF
+
 ```bash
 python run_ablation_study.py --n_trials 10
 ```
 
-## Results
+Sorties :
 
-The pipeline generates a variety of visual assets in the `research_results/` folder, including:
-- **Precision-Recall Curves**: To visualize the trade-off between model confidence and coverage.
-- **Feature Importance**: Identifying which founder traits contribute most to predicted success.
-- **Ablation Comparison**: Side-by-side bar charts showing the lift in F0.5, Precision, and Recall when using TF-IDF.
+- `research_results/ablation_study/ablation_metrics.csv`
+- `research_results/ablation_study/ablation_f0.5.png`
+- `research_results/ablation_study/ablation_precision.png`
+- `research_results/ablation_study/ablation_recall.png`
 
+## Modèles entraînés
+
+Le pipeline inclut notamment :
+
+- Logistic Regression
+- Random Forest
+- AdaBoost
+- SVM
+- MLP
+- (et un ensemble stacking selon la configuration)
+
+L’optimisation hyperparamétrique est gérée par **Optuna**.
+
+## Dictionnaire projet (FR)
+
+```js
+{
+  project_id: "vcbench-ml",
+  icon: "",
+  title: "Prédiction du succès de fondateurs de startups (VCBench)",
+  company: "VCBench (challenge data science)",
+  description: "Pipeline de classification binaire qui prédit la réussite de fondateurs à partir de données de parcours (éducation, carrière, exits, industrie) enrichies par des features sémantiques TF-IDF.",
+  tags: ["Machine Learning", "Classification", "Optuna", "TF-IDF", "Scikit-learn", "Ablation Study"],
+  github_link: "https://github.com/IThioye/vcbench-ml",
+  demo_link: "#",
+  full_details: "<h3>Mission</h3><p>Concevoir un modèle de scoring des fondateurs capable d’anticiper la variable cible <code>success</code> dans le cadre du benchmark VCBench.</p><h3>Méthodes</h3><p>Feature engineering sur des données structurées et semi-structurées (éducation, expériences, IPO/acquisitions, industrie), vectorisation TF-IDF d’un résumé texte, entraînement multi-modèles avec validation croisée et tuning Optuna, puis sélection automatique selon le score F0.5.</p><h3>Livrables</h3><p>Un mode recherche avec diagnostics (comparaison de modèles, courbes d’apprentissage, matrices de confusion, importance des variables) et un mode benchmark produisant un <code>submission.csv</code> binaire prêt pour évaluation privée.</p>"
+}
+```
+
+## Conseils pratiques
+
+- Commencez avec peu d’essais (`--n_trials 5` ou `10`) pour valider le pipeline.
+- Montez ensuite à `30+` pour un tuning plus robuste.
+- Utilisez `--no_text` pour mesurer le gain réel des features sémantiques sur votre split courant.
+
+## Licence
+
+Ajoutez ici la licence de votre choix (MIT, Apache-2.0, etc.) si nécessaire.
